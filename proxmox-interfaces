@@ -1,0 +1,67 @@
+# ============================================================
+# /etc/network/interfaces — Proxmox Server
+# ============================================================
+# NIC (eno1) is configured as a raw 802.1Q trunk with no IP.
+# Each VLAN gets a tagged sub-interface attached to a Linux bridge.
+# The bridge IP is the address Proxmox VMs on that VLAN use as gateway.
+#
+# Proxmox management bridge (vmbr0) uses a static IP — never DHCP.
+# Static addressing ensures Proxmox is always reachable at a known address
+# even if the router's DHCP service is unavailable at boot.
+#
+# VLAN 30 (Isolated Lab) uses vmbr1 with bridge-ports none.
+# No physical interface is attached — VMs on this bridge can only reach
+# other VMs on the same bridge. Traffic cannot leave the hypervisor.
+# This is stronger isolation than any firewall rule.
+# ============================================================
+
+auto lo
+iface lo inet loopback
+
+# Physical NIC — raw trunk, no IP assigned here
+# Replace eno1 with your actual NIC name (check with: ip link show)
+auto eno1
+iface eno1 inet manual
+
+# ---- VLAN 20 — Proxmox Management ----
+auto eno1.20
+iface eno1.20 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+    address 192.168.20.10/24
+    gateway 192.168.20.1
+    bridge-ports eno1.20
+    bridge-stp off
+    bridge-fd 0
+    # Static IP chosen below DHCP range (.100+) to avoid conflicts
+
+# ---- VLAN 40 — Web Lab ----
+auto eno1.40
+iface eno1.40 inet manual
+
+auto vmbr3
+iface vmbr3 inet manual
+    bridge-ports eno1.40
+    bridge-stp off
+    bridge-fd 0
+    # No IP on the bridge — VMs get addresses from the router DHCP scope
+
+# ---- VLAN 50 — Cloud/IoT Lab ----
+auto eno1.50
+iface eno1.50 inet manual
+
+auto vmbr5
+iface vmbr5 inet manual
+    bridge-ports eno1.50
+    bridge-stp off
+    bridge-fd 0
+
+# ---- VLAN 30 — Isolated Lab (air-gapped, no physical port) ----
+auto vmbr1
+iface vmbr1 inet manual
+    bridge-ports none
+    bridge-stp off
+    bridge-fd 0
+    # bridge-ports none = no physical NIC attached
+    # VMs on this bridge are completely isolated inside the hypervisor

@@ -1,0 +1,32 @@
+# ============================================================
+# dnsmasq.conf.add - VLAN DHCP Configuration
+# GT-AX11000 | Asuswrt-Merlin
+# ============================================================
+# This file is appended to the router's main dnsmasq config
+# before the service starts. It adds DHCP scopes for each
+# VLAN bridge without modifying the base config (which would
+# be overwritten on firmware updates).
+#
+# Addressing convention:
+#   .1        = Router gateway (assigned in init-start)
+#   .2–.99    = Reserved for static assignment (servers, infrastructure)
+#   .100–.200 = DHCP range (VMs and dynamic devices)
+#
+# VLAN 30 has no entry — it is entirely internal to Proxmox.
+# The router has no interface on that network.
+# ============================================================
+
+# VLAN 20 - Proxmox
+# Proxmox itself uses a static IP (192.168.20.10) assigned in
+# /etc/network/interfaces — it does not use DHCP.
+# This range serves any additional VMs on the Proxmox management bridge.
+interface=br20
+dhcp-range=br20,192.168.20.100,192.168.20.200,255.255.255.0,12h
+
+# VLAN 40 - Web Lab
+interface=br40
+dhcp-range=br40,192.168.40.100,192.168.40.200,255.255.255.0,12h
+
+# VLAN 50 - Cloud/IoT Lab
+interface=br50
+dhcp-range=br50,192.168.50.100,192.168.50.200,255.255.255.0,12h

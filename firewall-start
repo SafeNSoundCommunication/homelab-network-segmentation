@@ -1,0 +1,132 @@
+#!/bin/sh
+# ============================================================
+# FIREWALL RULES - Multi-VLAN Setup
+# GT-AX11000 | Asuswrt-Merlin
+# ============================================================
+# VLAN 10  - Management   | 192.168.10.0/24 | br0
+# VLAN 20  - Proxmox      | 192.168.20.0/24 | br20
+# VLAN 30  - Isolated Lab | 192.168.30.0/24 | Proxmox internal only
+# VLAN 40  - Web Lab      | 192.168.40.0/24 | br40
+# VLAN 50  - Cloud/IoT    | 192.168.50.0/24 | br50
+#
+# Access Control Policy:
+#   VLAN 10 → VLAN 20 : ALLOW  (management devices reach Proxmox GUI)
+#   VLAN 10 → VLAN 30 : BLOCK  (management never touches attack lab)
+#   VLAN 10 → internet : ALLOW  (handled by Merlin default NAT)
+#   VLAN 20 → VLAN 10 : BLOCK
+#   VLAN 20 → internet : ALLOW  (package updates)
+#   VLAN 20 → all else : BLOCK
+#   VLAN 30 → anywhere : BLOCK  (air-gapped, defence-in-depth fallback)
+#   VLAN 40 → internet : ALLOW TCP 80/443 only
+#   VLAN 40 → all VLANs: BLOCK
+#   VLAN 50 → internet : ALLOW TCP 443 only
+#   VLAN 50 → all VLANs: BLOCK
+# ============================================================
+
+# --- Create and flush custom chain ---
+# Using a dedicated chain keeps our rules separate from Merlin's defaults,
+# makes the policy auditable with: iptables -L VLANS --line-numbers
+# and prevents rule duplication if this script runs more than once.
+iptables -N VLANS 2>/dev/null
+iptables -F VLANS
+iptables -I FORWARD 1 -j VLANS
+
+# --- Stateful connection tracking (MUST be first) ---
+# Allows return traffic for already-approved connections.
+# Without this rule, TCP responses are dropped by the rules below,
+# breaking all outbound connections regardless of ACCEPT rules.
+iptables -A VLANS -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# ============================================================
+# VLAN 10 — Management (br0 | 192.168.10.0/24)
+# ============================================================
+# Allow management devices to reach the Proxmox GUI (192.168.20.1:8006)
+iptables -A VLANS -i br0 -o br20 -j ACCEPT
+
+# Block management from reaching the isolated attack lab (defence in depth —
+# VLAN 30 has no router interface, but this catches any misconfiguration)
+iptables -A VLANS -i br0 -d 192.168.30.0/24 -j DROP
+
+# Internet access for VLAN 10 is handled by Merlin's existing NAT — no rule needed here.
+
+# ============================================================
+# VLAN 20 — Proxmox (br20 | 192.168.20.0/24)
+# ============================================================
+# Block Proxmox from initiating connections to any internal VLAN.
+# These DROP rules must appear BEFORE the broad ACCEPT below.
+# iptables evaluates top-to-bottom — a packet to 192.168.10.0/24 hits
+# the first DROP and is discarded; a packet to a public IP hits none
+# of these DROPs and falls through to ACCEPT (internet allowed).
+iptables -A VLANS -i br20 -d 192.168.10.0/24 -j DROP   # Block → Management
+iptables -A VLANS -i br20 -d 192.168.30.0/24 -j DROP   # Block → Isolated Lab
+iptables -A VLANS -i br20 -d 192.168.40.0/24 -j DROP   # Block → Web Lab
+iptables -A VLANS -i br20 -d 192.168.50.0/24 -j DROP   # Block → Cloud/IoT
+
+# Allow all remaining outbound from VLAN 20 (internet for package updates)
+iptables -A VLANS -i br20 -j ACCEPT
+
+# Block all unsolicited inbound to VLAN 20.
+# ESTABLISHED,RELATED at the top already allows responses to Proxmox-initiated
+# connections. The only permitted inbound path is from VLAN 10, which was
+# ACCEPTed earlier and never reaches this DROP rule.
+iptables -A VLANS -o br20 -j DROP
+
+# NAT for internet access
+iptables -t nat -A POSTROUTING -s 192.168.20.0/24 -j MASQUERADE
+
+# ============================================================
+# VLAN 30 — Isolated Lab (Proxmox internal | 192.168.30.0/24)
+# ============================================================
+# The primary isolation is architectural — vmbr1/vmbr2 in Proxmox have
+# no physical port, so traffic cannot leave the hypervisor at all.
+# These rules are a defence-in-depth fallback at the router perimeter.
+iptables -A VLANS -s 192.168.30.0/24 -j DROP
+iptables -A VLANS -d 192.168.30.0/24 -j DROP
+
+# ============================================================
+# VLAN 40 — Web Lab (br40 | 192.168.40.0/24)
+# ============================================================
+# Block Web Lab from reaching any internal VLAN.
+iptables -A VLANS -i br40 -d 192.168.10.0/24 -j DROP   # Block → Management
+iptables -A VLANS -i br40 -d 192.168.20.0/24 -j DROP   # Block → Proxmox
+iptables -A VLANS -i br40 -d 192.168.30.0/24 -j DROP   # Block → Isolated Lab
+iptables -A VLANS -i br40 -d 192.168.50.0/24 -j DROP   # Block → Cloud/IoT
+
+# Allow outbound HTTP and HTTPS only.
+# All other protocols (ICMP, UDP) and TCP ports are blocked.
+# This permits package installation and web browsing while preventing
+# non-standard C2 callbacks and lateral movement.
+iptables -A VLANS -i br40 -p tcp --dport 80  -j ACCEPT
+iptables -A VLANS -i br40 -p tcp --dport 443 -j ACCEPT
+
+# Block all other outbound from VLAN 40
+iptables -A VLANS -i br40 -j DROP
+
+# Block all unsolicited inbound to VLAN 40
+iptables -A VLANS -o br40 -j DROP
+
+# NAT for internet access
+iptables -t nat -A POSTROUTING -s 192.168.40.0/24 -j MASQUERADE
+
+# ============================================================
+# VLAN 50 — Cloud/IoT Lab (br50 | 192.168.50.0/24)
+# ============================================================
+# Block Cloud/IoT from reaching any internal VLAN.
+iptables -A VLANS -i br50 -d 192.168.10.0/24 -j DROP   # Block → Management
+iptables -A VLANS -i br50 -d 192.168.20.0/24 -j DROP   # Block → Proxmox
+iptables -A VLANS -i br50 -d 192.168.30.0/24 -j DROP   # Block → Isolated Lab
+iptables -A VLANS -i br50 -d 192.168.40.0/24 -j DROP   # Block → Web Lab
+
+# Allow outbound HTTPS only (port 443).
+# Legitimate IoT cloud services communicate exclusively over HTTPS.
+# HTTP (port 80) is blocked — a real IoT device using HTTP is a red flag.
+iptables -A VLANS -i br50 -p tcp --dport 443 -j ACCEPT
+
+# Block all other outbound from VLAN 50
+iptables -A VLANS -i br50 -j DROP
+
+# Block all unsolicited inbound to VLAN 50
+iptables -A VLANS -o br50 -j DROP
+
+# NAT for internet access
+iptables -t nat -A POSTROUTING -s 192.168.50.0/24 -j MASQUERADE

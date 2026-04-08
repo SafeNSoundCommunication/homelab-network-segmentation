@@ -1,0 +1,63 @@
+#!/bin/sh
+# ============================================================
+# VLAN INIT - GT-AX11000 | Asuswrt-Merlin
+# ============================================================
+# VLAN 10  - Management   | 192.168.10.0/24 | br0 (existing default LAN)
+# VLAN 20  - Proxmox      | 192.168.20.0/24 | br20
+# VLAN 30  - Isolated Lab | 192.168.30.0/24 | Proxmox internal only, no router bridge
+# VLAN 40  - Web Lab      | 192.168.40.0/24 | br40
+# VLAN 50  - Cloud/IoT    | 192.168.50.0/24 | br50
+#
+# Port layout:
+#   LAN Port 1 = eth2  → Management (VLAN 10, stays in br0)
+#   LAN Port 2 = eth3  → Proxmox trunk (VLANs 20/40/50 tagged)
+#   LAN Port 3 = eth4  → Management (VLAN 10, stays in br0)
+#   LAN Port 4 = eth5  → Management (VLAN 10, stays in br0)
+#   2.5G Port  = eth6  → Management (VLAN 10, stays in br0)
+#
+# NOTE: Verify your trunk port interface with:
+#   for i in 2 3 4 5; do echo "eth$i: $(cat /sys/class/net/eth$i/operstate)"; done
+# Unplug your server cable and run again — the interface that flips to DOWN is your trunk port.
+# ============================================================
+
+# --- STEP 1: Remove trunk port from the default LAN bridge ---
+# eth3 is currently a member of br0 (Management LAN).
+# It must be removed before being repurposed as a VLAN trunk,
+# otherwise tagged frames would leak into the management LAN.
+ip link set eth3 down
+brctl delif br0 eth3
+ip link set eth3 up
+
+# --- STEP 2: Create 802.1Q tagged sub-interfaces on the trunk port ---
+# Each sub-interface listens only for frames tagged with its VLAN ID.
+# No sub-interface is created for VLAN 30 — that VLAN has no router presence by design.
+ip link add link eth3 name eth3.20 type vlan id 20
+ip link add link eth3 name eth3.40 type vlan id 40
+ip link add link eth3 name eth3.50 type vlan id 50
+
+ip link set eth3.20 up
+ip link set eth3.40 up
+ip link set eth3.50 up
+
+# --- STEP 3: Create Linux bridges and attach VLAN sub-interfaces ---
+# Each bridge acts as a virtual switch for its VLAN.
+# The bridge provides a layer 2 attachment point for the gateway IP.
+brctl addbr br20
+brctl addbr br40
+brctl addbr br50
+
+brctl addif br20 eth3.20
+brctl addif br40 eth3.40
+brctl addif br50 eth3.50
+
+ip link set br20 up
+ip link set br40 up
+ip link set br50 up
+
+# --- STEP 4: Assign router gateway IPs to each bridge ---
+# These become the default gateways for devices on each VLAN.
+# Addresses use .1 — static infrastructure addresses are kept below .100
+# so they don't conflict with the DHCP range defined in dnsmasq.conf.add.
+ip addr add 192.168.20.1/24 dev br20
+ip addr add 192.168.40.1/24 dev br40
+ip addr add 192.168.50.1/24 dev br50
